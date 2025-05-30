@@ -173,6 +173,8 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                 # Buffer to accumulate raw response lines
                 buffer = ""
                 is_json_complete = False
+                last_sent_time = time.time()
+                
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line:
@@ -183,9 +185,26 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                     # Accumulate lines into buffer
                     buffer += line + "\n"
                     
+                    # Send keep-alive chunk if no data has been sent for 5 seconds
+                    current_time = time.time()
+                    if current_time - last_sent_time >= 5:
+                        keep_alive_chunk = {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_time,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": "."},
+                                "finish_reason": None
+                            }]
+                        }
+                        yield f"data: {json.dumps(keep_alive_chunk)}\n\n"
+                        last_sent_time = current_time
+                        print("Sent keep-alive chunk to client")
+                    
                     # Check if the buffer contains a complete JSON object or array
                     try:
-                        # Attempt to parse the buffer as JSON
                         potential_json = buffer.strip()
                         if potential_json.startswith('[') and not potential_json.endswith(']'):
                             continue
@@ -212,10 +231,11 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                                                     'choices': [{
                                                         'index': 0,
                                                         'delta': {'content': content},
-                                                        'finish_reason': None
+                                                        'finish_reason': None if candidate.get('finishReason') != 'STOP' else 'stop'
                                                     }]
                                                 }
                                                 yield f"data: {json.dumps(openai_chunk)}\n\n"
+                                                last_sent_time = time.time()
                         elif isinstance(chunks, dict) and 'candidates' in chunks:
                             candidate = chunks['candidates'][0]
                             if 'content' in candidate and 'parts' in candidate['content']:
@@ -230,29 +250,29 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                                             'choices': [{
                                                 'index': 0,
                                                 'delta': {'content': content},
-                                                'finish_reason': None
+                                                'finish_reason': None if candidate.get('finishReason') != 'STOP' else 'stop'
                                             }]
                                         }
                                         yield f"data: {json.dumps(openai_chunk)}\n\n"
+                                        last_sent_time = time.time()
                         
                         # Reset buffer after successful parsing
                         buffer = ""
+                        is_json_complete = False
                     
                     except json.JSONDecodeError as e:
                         print(f"JSON decode error (incomplete JSON, continuing): {e}, Buffer: {buffer}")
-                        # Continue accumulating lines if JSON is incomplete
-                        if not is_json_complete:
-                            continue
+                        continue
                     except Exception as e:
                         print(f"Stream processing error: {e}, Buffer: {buffer}")
                         buffer = ""
+                        is_json_complete = False
                         continue
                 
                 # Handle any remaining buffer data
                 if buffer:
                     print(f"Final buffer before closing: {buffer}")
                     try:
-                        # Try to parse the final buffer
                         potential_json = buffer.strip()
                         if potential_json.startswith('[') and not potential_json.endswith(']'):
                             potential_json += ']'
@@ -277,10 +297,11 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                                                     'choices': [{
                                                         'index': 0,
                                                         'delta': {'content': content},
-                                                        'finish_reason': None
+                                                        'finish_reason': None if candidate.get('finishReason') != 'STOP' else 'stop'
                                                     }]
                                                 }
                                                 yield f"data: {json.dumps(openai_chunk)}\n\n"
+                                                last_sent_time = time.time()
                         elif isinstance(chunks, dict) and 'candidates' in chunks:
                             candidate = chunks['candidates'][0]
                             if 'content' in candidate and 'parts' in candidate['content']:
@@ -295,10 +316,11 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                                             'choices': [{
                                                 'index': 0,
                                                 'delta': {'content': content},
-                                                'finish_reason': None
+                                                'finish_reason': None if candidate.get('finishReason') != 'STOP' else 'stop'
                                             }]
                                         }
                                         yield f"data: {json.dumps(openai_chunk)}\n\n"
+                                        last_sent_time = time.time()
                     except json.JSONDecodeError as e:
                         print(f"Final JSON decode error: {e}, Buffer: {buffer}")
                         error_chunk = {
@@ -316,19 +338,6 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
     
     except BrokenPipeError:
         print("Client closed connection prematurely (BrokenPipeError)")
-        error_chunk = {
-            'id': chunk_id,
-            'object': 'chat.completion.chunk',
-            'created': created_time,
-            'model': model,
-            'choices': [{
-                'index': 0,
-                'delta': {'content': "Client disconnected, streaming aborted"},
-                'finish_reason': 'error'
-            }]
-        }
-        yield f"data: {json.dumps(error_chunk)}\n\n"
-        yield "data: [DONE]\n\n"
         return
     
     except Exception as e:
@@ -346,21 +355,22 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
         }
         yield f"data: {json.dumps(error_chunk)}\n\n"
     
-    # Final chunk - Ensure proper termination
-    final_chunk = {
-        'id': chunk_id,
-        'object': 'chat.completion.chunk',
-        'created': created_time,
-        'model': model,
-        'choices': [{
-            'index': 0,
-            'delta': {},
-            'finish_reason': 'stop'
-        }]
-    }
-    yield f"data: {json.dumps(final_chunk)}\n\n"
-    yield "data: [DONE]\n\n"
-    print("Streaming completed with final chunk and [DONE]")
+    finally:
+        # Final chunk - Ensure proper termination
+        final_chunk = {
+            'id': chunk_id,
+            'object': 'chat.completion.chunk',
+            'created': created_time,
+            'model': model,
+            'choices': [{
+                'index': 0,
+                'delta': {},
+                'finish_reason': 'stop'
+            }]
+        }
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+        print("Streaming completed with final chunk and [DONE]")
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
