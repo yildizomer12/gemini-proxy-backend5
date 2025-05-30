@@ -172,7 +172,7 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                 
                 # Buffer to accumulate raw response lines
                 buffer = ""
-                brace_count = 0  # Track opening and closing braces/brackets
+                is_json_complete = False
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line:
@@ -181,79 +181,85 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                     print(f"Raw Gemini response: {line}")
                     
                     # Accumulate lines into buffer
-                    buffer += line
+                    buffer += line + "\n"
                     
-                    # Count opening and closing braces/brackets to determine if JSON is complete
-                    brace_count += line.count('{') + line.count('[')
-                    brace_count -= line.count('}') + line.count(']')
-                    
-                    # Try to parse the accumulated buffer as a complete JSON only when braces match
-                    if brace_count == 0 and buffer:
-                        try:
-                            # Parse the buffer as JSON
-                            chunks = json.loads(buffer)
-                            print(f"Processed chunks: {buffer}")
-                            
-                            # Process each chunk in the array or object
-                            if isinstance(chunks, list):
-                                for chunk_data in chunks:
-                                    if 'candidates' in chunk_data:
-                                        candidate = chunk_data['candidates'][0]
-                                        if 'content' in candidate and 'parts' in candidate['content']:
-                                            for part in candidate['content']['parts']:
-                                                if 'text' in part:
-                                                    content = part['text']
-                                                    openai_chunk = {
-                                                        'id': chunk_id,
-                                                        'object': 'chat.completion.chunk',
-                                                        'created': created_time,
-                                                        'model': model,
-                                                        'choices': [{
-                                                            'index': 0,
-                                                            'delta': {'content': content},
-                                                            'finish_reason': None
-                                                        }]
-                                                    }
-                                                    yield f"data: {json.dumps(openai_chunk)}\n\n"
-                            elif isinstance(chunks, dict) and 'candidates' in chunks:
-                                candidate = chunks['candidates'][0]
-                                if 'content' in candidate and 'parts' in candidate['content']:
-                                    for part in candidate['content']['parts']:
-                                        if 'text' in part:
-                                            content = part['text']
-                                            openai_chunk = {
-                                                'id': chunk_id,
-                                                'object': 'chat.completion.chunk',
-                                                'created': created_time,
-                                                'model': model,
-                                                'choices': [{
-                                                    'index': 0,
-                                                    'delta': {'content': content},
-                                                    'finish_reason': None
-                                                }]
-                                            }
-                                            yield f"data: {json.dumps(openai_chunk)}\n\n"
-                            
-                            # Reset buffer and brace count after successful parsing
-                            buffer = ""
-                            brace_count = 0
+                    # Check if the buffer contains a complete JSON object or array
+                    try:
+                        # Attempt to parse the buffer as JSON
+                        potential_json = buffer.strip()
+                        if potential_json.startswith('[') and not potential_json.endswith(']'):
+                            continue
+                        if potential_json.startswith('{') and not potential_json.endswith('}'):
+                            continue
+                        chunks = json.loads(potential_json)
+                        is_json_complete = True
+                        print(f"Processed chunks: {potential_json}")
                         
-                        except json.JSONDecodeError as e:
-                            print(f"JSON decode error (incomplete JSON, continuing): {e}, Buffer: {buffer}")
+                        # Process each chunk in the array or object
+                        if isinstance(chunks, list):
+                            for chunk_data in chunks:
+                                if 'candidates' in chunk_data:
+                                    candidate = chunk_data['candidates'][0]
+                                    if 'content' in candidate and 'parts' in candidate['content']:
+                                        for part in candidate['content']['parts']:
+                                            if 'text' in part:
+                                                content = part['text']
+                                                openai_chunk = {
+                                                    'id': chunk_id,
+                                                    'object': 'chat.completion.chunk',
+                                                    'created': created_time,
+                                                    'model': model,
+                                                    'choices': [{
+                                                        'index': 0,
+                                                        'delta': {'content': content},
+                                                        'finish_reason': None
+                                                    }]
+                                                }
+                                                yield f"data: {json.dumps(openai_chunk)}\n\n"
+                        elif isinstance(chunks, dict) and 'candidates' in chunks:
+                            candidate = chunks['candidates'][0]
+                            if 'content' in candidate and 'parts' in candidate['content']:
+                                for part in candidate['content']['parts']:
+                                    if 'text' in part:
+                                        content = part['text']
+                                        openai_chunk = {
+                                            'id': chunk_id,
+                                            'object': 'chat.completion.chunk',
+                                            'created': created_time,
+                                            'model': model,
+                                            'choices': [{
+                                                'index': 0,
+                                                'delta': {'content': content},
+                                                'finish_reason': None
+                                            }]
+                                        }
+                                        yield f"data: {json.dumps(openai_chunk)}\n\n"
+                        
+                        # Reset buffer after successful parsing
+                        buffer = ""
+                    
+                    except json.JSONDecodeError as e:
+                        print(f"JSON decode error (incomplete JSON, continuing): {e}, Buffer: {buffer}")
+                        # Continue accumulating lines if JSON is incomplete
+                        if not is_json_complete:
                             continue
-                        except Exception as e:
-                            print(f"Stream processing error: {e}, Buffer: {buffer}")
-                            buffer = ""
-                            brace_count = 0
-                            continue
+                    except Exception as e:
+                        print(f"Stream processing error: {e}, Buffer: {buffer}")
+                        buffer = ""
+                        continue
                 
                 # Handle any remaining buffer data
                 if buffer:
                     print(f"Final buffer before closing: {buffer}")
                     try:
                         # Try to parse the final buffer
-                        chunks = json.loads(buffer)
-                        print(f"Processed final chunks: {buffer}")
+                        potential_json = buffer.strip()
+                        if potential_json.startswith('[') and not potential_json.endswith(']'):
+                            potential_json += ']'
+                        elif potential_json.startswith('{') and not potential_json.endswith('}'):
+                            potential_json += '}'
+                        chunks = json.loads(potential_json)
+                        print(f"Processed final chunks: {potential_json}")
                         
                         if isinstance(chunks, list):
                             for chunk_data in chunks:
