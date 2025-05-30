@@ -158,7 +158,6 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                 
                 # Buffer to accumulate raw response lines
                 buffer = ""
-                complete_json = False
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line:
@@ -166,17 +165,17 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                     
                     print(f"Raw Gemini response: {line}")
                     
-                    # Accumulate lines into buffer without adding commas
+                    # Accumulate lines into buffer
                     buffer += line
                     
-                    # Check if the buffer forms a complete JSON array
+                    # Try to parse the accumulated buffer as a complete JSON
                     try:
-                        # Add closing bracket if buffer starts with '['
-                        test_buffer = buffer + ']' if buffer.startswith('[') and not buffer.endswith(']') else buffer
-                        chunks = json.loads(test_buffer)
+                        # Add closing bracket if buffer starts with '[' and doesn't end with ']'
+                        test_buffer = buffer if not buffer.startswith('[') else (buffer + ']' if not buffer.endswith(']') else buffer)
+                        chunks = json.loads(test_buffer) if test_buffer else []
                         print(f"Processed chunks: {test_buffer}")
                         
-                        # Process each chunk in the array
+                        # Process each chunk in the array or object
                         if isinstance(chunks, list):
                             for chunk_data in chunks:
                                 if 'candidates' in chunk_data:
@@ -197,27 +196,43 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                                                     }]
                                                 }
                                                 yield f"data: {json.dumps(openai_chunk)}\n\n"
+                        elif isinstance(chunks, dict) and 'candidates' in chunks:
+                            candidate = chunks['candidates'][0]
+                            if 'content' in candidate and 'parts' in candidate['content']:
+                                for part in candidate['content']['parts']:
+                                    if 'text' in part:
+                                        content = part['text']
+                                        openai_chunk = {
+                                            'id': chunk_id,
+                                            'object': 'chat.completion.chunk',
+                                            'created': created_time,
+                                            'model': model,
+                                            'choices': [{
+                                                'index': 0,
+                                                'delta': {'content': content},
+                                                'finish_reason': None
+                                            }]
+                                        }
+                                        yield f"data: {json.dumps(openai_chunk)}\n\n"
                         
-                        # Reset buffer if we've processed a complete JSON array
+                        # Reset buffer after successful parsing
                         buffer = ""
-                        complete_json = True
                     
                     except json.JSONDecodeError as e:
                         print(f"JSON decode error (incomplete JSON, continuing): {e}, Buffer: {buffer}")
-                        complete_json = False
+                        # Continue accumulating lines if JSON is incomplete
                         continue
                     except Exception as e:
                         print(f"Stream processing error: {e}, Buffer: {buffer}")
                         buffer = ""
                         continue
                 
-                # If the loop ends and we have unprocessed data in the buffer
-                if buffer and not complete_json:
+                # Handle any remaining buffer data
+                if buffer:
                     print(f"Final buffer before closing: {buffer}")
                     try:
-                        # Attempt to parse the final buffer
-                        test_buffer = buffer + ']' if buffer.startswith('[') and not buffer.endswith(']') else buffer
-                        chunks = json.loads(test_buffer)
+                        test_buffer = buffer if not buffer.startswith('[') else (buffer + ']' if not buffer.endswith(']') else buffer)
+                        chunks = json.loads(test_buffer) if test_buffer else []
                         print(f"Processed final chunks: {test_buffer}")
                         
                         if isinstance(chunks, list):
@@ -240,6 +255,24 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                                                     }]
                                                 }
                                                 yield f"data: {json.dumps(openai_chunk)}\n\n"
+                        elif isinstance(chunks, dict) and 'candidates' in chunks:
+                            candidate = chunks['candidates'][0]
+                            if 'content' in candidate and 'parts' in candidate['content']:
+                                for part in candidate['content']['parts']:
+                                    if 'text' in part:
+                                        content = part['text']
+                                        openai_chunk = {
+                                            'id': chunk_id,
+                                            'object': 'chat.completion.chunk',
+                                            'created': created_time,
+                                            'model': model,
+                                            'choices': [{
+                                                'index': 0,
+                                                'delta': {'content': content},
+                                                'finish_reason': None
+                                            }]
+                                        }
+                                        yield f"data: {json.dumps(openai_chunk)}\n\n"
                     except json.JSONDecodeError as e:
                         print(f"Final JSON decode error: {e}, Buffer: {buffer}")
                         error_chunk = {
