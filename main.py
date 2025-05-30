@@ -156,8 +156,9 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                     yield "data: [DONE]\n\n"
                     return
                 
-                # Buffer to accumulate incomplete JSON lines
+                # Buffer to accumulate raw response lines
                 buffer = ""
+                complete_json = False
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line:
@@ -165,20 +166,21 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                     
                     print(f"Raw Gemini response: {line}")
                     
-                    # Accumulate lines into buffer
-                    buffer += line if not buffer else f",{line}"
+                    # Accumulate lines into buffer without adding commas
+                    buffer += line
                     
-                    # Try to parse the accumulated buffer as JSON
+                    # Check if the buffer forms a complete JSON array
                     try:
-                        chunk_data = json.loads(f"[{buffer}]") if buffer else []
-                        print(f"Processed chunk: [{buffer}]")
-                        buffer = ""  # Reset buffer after successful parsing
+                        # Add closing bracket if buffer starts with '['
+                        test_buffer = buffer + ']' if buffer.startswith('[') and not buffer.endswith(']') else buffer
+                        chunks = json.loads(test_buffer)
+                        print(f"Processed chunks: {test_buffer}")
                         
-                        # Extract text from Gemini chunk
-                        if isinstance(chunk_data, list) and len(chunk_data) > 0:
-                            for item in chunk_data:
-                                if 'candidates' in item:
-                                    candidate = item['candidates'][0]
+                        # Process each chunk in the array
+                        if isinstance(chunks, list):
+                            for chunk_data in chunks:
+                                if 'candidates' in chunk_data:
+                                    candidate = chunk_data['candidates'][0]
                                     if 'content' in candidate and 'parts' in candidate['content']:
                                         for part in candidate['content']['parts']:
                                             if 'text' in part:
@@ -195,15 +197,63 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                                                     }]
                                                 }
                                                 yield f"data: {json.dumps(openai_chunk)}\n\n"
+                        
+                        # Reset buffer if we've processed a complete JSON array
+                        buffer = ""
+                        complete_json = True
                     
                     except json.JSONDecodeError as e:
                         print(f"JSON decode error (incomplete JSON, continuing): {e}, Buffer: {buffer}")
-                        # If JSON is incomplete, continue accumulating lines
+                        complete_json = False
                         continue
                     except Exception as e:
                         print(f"Stream processing error: {e}, Buffer: {buffer}")
-                        buffer = ""  # Reset buffer on error
+                        buffer = ""
                         continue
+                
+                # If the loop ends and we have unprocessed data in the buffer
+                if buffer and not complete_json:
+                    print(f"Final buffer before closing: {buffer}")
+                    try:
+                        # Attempt to parse the final buffer
+                        test_buffer = buffer + ']' if buffer.startswith('[') and not buffer.endswith(']') else buffer
+                        chunks = json.loads(test_buffer)
+                        print(f"Processed final chunks: {test_buffer}")
+                        
+                        if isinstance(chunks, list):
+                            for chunk_data in chunks:
+                                if 'candidates' in chunk_data:
+                                    candidate = chunk_data['candidates'][0]
+                                    if 'content' in candidate and 'parts' in candidate['content']:
+                                        for part in candidate['content']['parts']:
+                                            if 'text' in part:
+                                                content = part['text']
+                                                openai_chunk = {
+                                                    'id': chunk_id,
+                                                    'object': 'chat.completion.chunk',
+                                                    'created': created_time,
+                                                    'model': model,
+                                                    'choices': [{
+                                                        'index': 0,
+                                                        'delta': {'content': content},
+                                                        'finish_reason': None
+                                                    }]
+                                                }
+                                                yield f"data: {json.dumps(openai_chunk)}\n\n"
+                    except json.JSONDecodeError as e:
+                        print(f"Final JSON decode error: {e}, Buffer: {buffer}")
+                        error_chunk = {
+                            'id': chunk_id,
+                            'object': 'chat.completion.chunk',
+                            'created': created_time,
+                            'model': model,
+                            'choices': [{
+                                'index': 0,
+                                'delta': {'content': f"Stream error: Incomplete JSON response from API"},
+                                'finish_reason': 'error'
+                            }]
+                        }
+                        yield f"data: {json.dumps(error_chunk)}\n\n"
     
     except BrokenPipeError:
         print("Client closed connection prematurely (BrokenPipeError)")
