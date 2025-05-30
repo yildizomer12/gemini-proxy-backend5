@@ -170,9 +170,15 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                     
                     # Try to parse the accumulated buffer as a complete JSON
                     try:
-                        # Add closing bracket if buffer starts with '[' and doesn't end with ']'
-                        test_buffer = buffer if not buffer.startswith('[') else (buffer + ']' if not buffer.endswith(']') else buffer)
-                        chunks = json.loads(test_buffer) if test_buffer else []
+                        # Determine if buffer starts with array or object and add closing character if needed
+                        if buffer.startswith('[') and not buffer.endswith(']'):
+                            test_buffer = buffer + ']'
+                        elif buffer.startswith('{') and not buffer.endswith('}'):
+                            test_buffer = buffer + '}'
+                        else:
+                            test_buffer = buffer
+                        
+                        chunks = json.loads(test_buffer)
                         print(f"Processed chunks: {test_buffer}")
                         
                         # Process each chunk in the array or object
@@ -231,8 +237,15 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                 if buffer:
                     print(f"Final buffer before closing: {buffer}")
                     try:
-                        test_buffer = buffer if not buffer.startswith('[') else (buffer + ']' if not buffer.endswith(']') else buffer)
-                        chunks = json.loads(test_buffer) if test_buffer else []
+                        # Determine closing character for final buffer
+                        if buffer.startswith('[') and not buffer.endswith(']'):
+                            test_buffer = buffer + ']'
+                        elif buffer.startswith('{') and not buffer.endswith('}'):
+                            test_buffer = buffer + '}'
+                        else:
+                            test_buffer = buffer
+                        
+                        chunks = json.loads(test_buffer)
                         print(f"Processed final chunks: {test_buffer}")
                         
                         if isinstance(chunks, list):
