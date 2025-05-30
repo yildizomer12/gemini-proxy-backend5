@@ -123,7 +123,7 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
     yield f"data: {json.dumps(initial_chunk)}\n\n"
     
     try:
-        async with httpx.AsyncClient(timeout=120) as client:  # Zaman aşımını artır
+        async with httpx.AsyncClient(timeout=60) as client:
             # Gemini stream endpoint kullan
             async with client.stream(
                 'POST',
@@ -145,10 +145,12 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                         detail=f"Gemini API error: {error_text.decode()}"
                     )
                 
+                # Track if we've received any content
+                content_received = False
+                
                 # Process real stream chunks
                 async for line in response.aiter_lines():
                     line = line.strip()
-                    print(f"Raw Gemini response: {line}")  # Hata ayıklama için log
                     if not line:
                         continue
                         
@@ -161,13 +163,21 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                                 
                             chunk_data = json.loads(json_str)
                             
-                            # Extract text from Gemini chunk
+                            # Check if this is the final chunk from Gemini
+                            is_final_chunk = False
                             if 'candidates' in chunk_data:
                                 candidate = chunk_data['candidates'][0]
+                                
+                                # Check finish reason from Gemini
+                                if 'finishReason' in candidate:
+                                    is_final_chunk = True
+                                
+                                # Extract text if available
                                 if 'content' in candidate and 'parts' in candidate['content']:
                                     for part in candidate['content']['parts']:
                                         if 'text' in part:
                                             content = part['text']
+                                            content_received = True
                                             
                                             # Send OpenAI format chunk
                                             openai_chunk = {
@@ -184,10 +194,11 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                                             yield f"data: {json.dumps(openai_chunk)}\n\n"
                                             
                         except json.JSONDecodeError as e:
-                            print(f"JSON decode error: {e}")  # Hata ayıklama için
+                            # Skip invalid JSON lines
                             continue
                         except Exception as e:
-                            print(f"Stream processing error: {e}")  # Hata ayıklama için
+                            # Log error but continue streaming
+                            print(f"Stream processing error: {e}")
                             continue
     
     except Exception as e:
@@ -205,7 +216,21 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
         }
         yield f"data: {json.dumps(error_chunk)}\n\n"
     
-    # Final chunk - CRITICAL for Cline
+    # CRITICAL: Send final chunk with empty delta BEFORE finish_reason
+    empty_chunk = {
+        'id': chunk_id,
+        'object': 'chat.completion.chunk',
+        'created': created_time,
+        'model': model,
+        'choices': [{
+            'index': 0,
+            'delta': {},
+            'finish_reason': None
+        }]
+    }
+    yield f"data: {json.dumps(empty_chunk)}\n\n"
+    
+    # Final chunk with finish_reason - CRITICAL for Cline
     final_chunk = {
         'id': chunk_id,
         'object': 'chat.completion.chunk',
@@ -218,7 +243,7 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
         }]
     }
     yield f"data: {json.dumps(final_chunk)}\n\n"
-    yield "data: [DONE]\n\n"  # Son mesajın kesinlikle gönderildiğinden emin ol
+    yield "data: [DONE]\n\n"
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
@@ -237,11 +262,11 @@ async def chat_completions(request: ChatRequest):
                 real_gemini_stream(api_key, gemini_messages, generation_config, request.model),
                 media_type="text/event-stream",
                 headers={
-                    "Cache-Control": "no-cache",
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
                     "Connection": "keep-alive",
                     "X-Accel-Buffering": "no",
                     "Access-Control-Allow-Origin": "*",
-                    "Transfer-Encoding": "chunked"  # Akış için açıkça belirt
+                    "Transfer-Encoding": "chunked"
                 }
             )
         else:
