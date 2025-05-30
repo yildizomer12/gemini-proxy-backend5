@@ -141,10 +141,20 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                 if response.status_code != 200:
                     error_text = await response.aread()
                     print(f"Gemini API error - Status: {response.status_code}, Response: {error_text.decode()}")
-                    raise HTTPException(
-                        status_code=response.status_code, 
-                        detail=f"Gemini API error: {error_text.decode()}"
-                    )
+                    error_chunk = {
+                        'id': chunk_id,
+                        'object': 'chat.completion.chunk',
+                        'created': created_time,
+                        'model': model,
+                        'choices': [{
+                            'index': 0,
+                            'delta': {'content': f"API error: {error_text.decode()}"},
+                            'finish_reason': 'error'
+                        }]
+                    }
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
                 
                 # Buffer to accumulate incomplete JSON lines
                 buffer = ""
@@ -156,35 +166,35 @@ async def real_gemini_stream(api_key: str, messages, generation_config, model: s
                     print(f"Raw Gemini response: {line}")
                     
                     # Accumulate lines into buffer
-                    buffer += line
+                    buffer += line if not buffer else f",{line}"
                     
                     # Try to parse the accumulated buffer as JSON
                     try:
-                        chunk_data = json.loads(buffer)
-                        print(f"Processed chunk: {buffer}")
+                        chunk_data = json.loads(f"[{buffer}]") if buffer else []
+                        print(f"Processed chunk: [{buffer}]")
                         buffer = ""  # Reset buffer after successful parsing
                         
                         # Extract text from Gemini chunk
                         if isinstance(chunk_data, list) and len(chunk_data) > 0:
-                            chunk_data = chunk_data[0]  # Gemini API wraps responses in a list
-                        if 'candidates' in chunk_data:
-                            candidate = chunk_data['candidates'][0]
-                            if 'content' in candidate and 'parts' in candidate['content']:
-                                for part in candidate['content']['parts']:
-                                    if 'text' in part:
-                                        content = part['text']
-                                        openai_chunk = {
-                                            'id': chunk_id,
-                                            'object': 'chat.completion.chunk',
-                                            'created': created_time,
-                                            'model': model,
-                                            'choices': [{
-                                                'index': 0,
-                                                'delta': {'content': content},
-                                                'finish_reason': None
-                                            }]
-                                        }
-                                        yield f"data: {json.dumps(openai_chunk)}\n\n"
+                            for item in chunk_data:
+                                if 'candidates' in item:
+                                    candidate = item['candidates'][0]
+                                    if 'content' in candidate and 'parts' in candidate['content']:
+                                        for part in candidate['content']['parts']:
+                                            if 'text' in part:
+                                                content = part['text']
+                                                openai_chunk = {
+                                                    'id': chunk_id,
+                                                    'object': 'chat.completion.chunk',
+                                                    'created': created_time,
+                                                    'model': model,
+                                                    'choices': [{
+                                                        'index': 0,
+                                                        'delta': {'content': content},
+                                                        'finish_reason': None
+                                                    }]
+                                                }
+                                                yield f"data: {json.dumps(openai_chunk)}\n\n"
                     
                     except json.JSONDecodeError as e:
                         print(f"JSON decode error (incomplete JSON, continuing): {e}, Buffer: {buffer}")
@@ -308,19 +318,6 @@ async def chat_completions(request: ChatRequest):
                 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/v1/models")
-async def list_models():
-    return {
-        "object": "list",
-        "data": [
-            {"id": "gemini-pro", "object": "model", "created": int(time.time()), "owned_by": "google"},
-            {"id": "gemini-pro-vision", "object": "model", "created": int(time.time()), "owned_by": "google"},
-            {"id": "gemini-1.5-flash", "object": "model", "created": int(time.time()), "owned_by": "google"},
-            {"id": "gemini-1.5-pro", "object": "model", "created": int(time.time()), "owned_by": "google"},
-            {"id": "gemini-2.0-flash-exp", "object": "model", "created": int(time.time()), "owned_by": "google"}
-        ]
-    }
 
 @app.get("/health")
 async def health():
